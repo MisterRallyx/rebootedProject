@@ -6,7 +6,14 @@ import socket
 import select
 import sys
 
+# server's settings
 NB_CONNEXIONS = 4
+
+# communication constants
+GET_MAP_STR = "GET MAP".encode()
+GET_MODEL_STR = "GET MODEL".encode()
+GET_NICKNAME_STR = "GET NICKNAME".encode()
+
 
 ################################################################################
 #                          NETWORK SERVER CONTROLLER                           #
@@ -22,8 +29,10 @@ class NetworkServerController:
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.sock.bind(('', self.port))
         self.sock.listen(NB_CONNEXIONS)
-        #list of socket
+        # list of socket
         self.sockList = [self.sock]
+        # dict of sockname
+        self.nicknames = dict()
 
     # send model to client sockets
     def sendModel(self, socket, sendMap = False):
@@ -37,15 +46,16 @@ class NetworkServerController:
             model_str = self.add_character_to_str(model_str, character)
         # string of all bombs
         for bomb in self.model.bombs :
-            model_str = self.add_bomb_to_str(model_str, character)
+            model_str = self.add_bomb_to_str(model_str, bomb)
         # string of all fruits
         for fruit in self.model.fruits :
             model_str = self.add_fruit_to_str(model_str, fruit)
         model_str += "END"
-        socket.send(model_str.encode())
+        socket.sendall(model_str.encode())
+        ack = socket.recv(1000)
 
     # transform a character object into a string
-    def add_character_to_str(self, str, character):
+    def add_character_to_str(self, str_m, character):
         str_m += "CHARACTER "
         str_m += str(character.kind) + " "
         str_m += str(character.health) + " "
@@ -74,8 +84,17 @@ class NetworkServerController:
 
     # treat a received message
     def treat(self, message, socket):
-        if message==b"GET":
+        # in case of get model ask
+        if message==GET_MODEL_STR:
             self.sendModel(socket)
+        #if sended nickname
+        else :
+            message = message.decode()
+            message = message.split(" ")
+            if message[0]=="SEND":
+                if message[1]=="NICKNAME":
+                    self.nicknames[socket] = message[2]
+                    self.model.add_character(message[2], isplayer=True)
 
     # time event
     def tick(self, dt):
@@ -86,18 +105,20 @@ class NetworkServerController:
                 sclient, addr = self.sock.accept()
                 self.sockList.append(sclient)
                 print('Connection by', addr)
-                # TODO: add character
+
             # socket client (new client message)
             else:
-                while True:
-                    # TODO: treat data
-                    data = sock.recv(1500)
-                    self.treat(data, sock)
-                    if data == b'' or data == b'\n' :
-                        print('Disconnected by')
-                        self.sockList.remove(sock)
-                        sock.close()
-                        break
+                # TODO: treat data
+                data = sock.recv(1500)
+                sock.send(b"ACK")
+                self.treat(data, sock)
+                if data == b'' or data == b'\n' :
+                    print('{} was disconnected.'.format(self.nicknames[sock]))
+                    self.model.kill_character(self.nicknames[sock])
+                    self.sockList.remove(sock)
+                    # TODO: envoyer un update de mouvement
+                    self.nicknames.pop(sock)
+                    sock.close()
         return True
 
 ################################################################################
@@ -118,18 +139,30 @@ class NetworkClientController:
         except :
             print('Unable to connect to {}. Please try later.'.format(host))
             sys.exit()
+        self.sendnickname()
         self.getModel()
 
     # get initial Model
     def getModel(self):
-        self.sock.send(b"GET")
+        self.sock.sendall(GET_MODEL_STR)
+        ack = self.sock.recv(1000)
         data = self.sock.recv(1500)
+        self.sock.send(b"ACK")
         self.treatData(data)
+
+    def sendnickname(self):
+        data = "SEND NICKNAME "
+        data += self.nickname
+        self.sock.sendall(data.encode())
+        ack = self.sock.recv(1000)
+        print("Nickname send : {}".format(self.nickname))
 
     # treat received data for updating the client model
     def treatData(self, data):
+        print("Enter in data treatment")
         data = data.decode()
         data_a = data.split(" ")
+        print(data_a)
         i = 0
         # get the original model
         if data_a[i]=="MODEL":
@@ -166,6 +199,9 @@ class NetworkClientController:
                     self.model.bombs[-1].max_range = max_range_b
                     i+=5
                 i+=1
+        elif data.encode()==GET_NICKNAME_STR:
+            self.sock.sendall(self.nickname.encode())
+            ack = self.sock.recv(1000)
 
     # keyboard events
     def keyboard_quit(self):
@@ -184,5 +220,11 @@ class NetworkClientController:
 
     # time event
     def tick(self, dt):
-        #self.getModel()
+        #data = self.sock.recv(1500)
+        #self.sock.send(b"ACK")
+        #if data==b'':
+            #print("Connection closed.")
+            #self.sock.close()
+            #return False
+        #self.treatData(data)
         return True
