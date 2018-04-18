@@ -33,6 +33,7 @@ class NetworkServerController:
         self.sockList = [self.sock]
         # dict of sockname
         self.nicknames = dict()
+        self.update = "NOTHING"
 
     # send model to client sockets
     def sendModel(self, socket, sendMap = False):
@@ -91,13 +92,41 @@ class NetworkServerController:
         else :
             message = message.decode()
             message = message.split(" ")
-            if message[0]=="SEND":
-                if message[1]=="NICKNAME":
-                    self.nicknames[socket] = message[2]
-                    self.model.add_character(message[2], isplayer=True)
+            if message[0]=="UPDATAMOVE":
+                print("ok {}".format(message))
+                nickname = self.nicknames[socket]
+                direction = int(message[1])
+                for cha in self.model.characters:
+                    if cha.nickname == nickname:
+                        print("found")
+                        cha.move(nickname)
+                        print("Moved")
+                #self.model.move_character(nickname)
+                #print("personnage moved")
+                self.update += "MOVE {} {} ".format(nickname, direction)
+
+    def broadcast(self, data):
+        for s in self.sockList:
+            if s != self.sock :
+                try:
+                    data = data.encode()
+                    s.send(data)
+                except:
+                    s.send(data)
+
+    def disconnectClient(self, sock):
+        nickname = self.nicknames[sock]
+        print('{} was disconnected.'.format(nickname))
+        self.model.kill_character(nickname)
+        self.sockList.remove(sock)
+        # TODO: envoyer un update de mouvement
+        self.nicknames.pop(sock)
+        sock.close()
+        self.update += "KILL {} ".format(nickname)
 
     # time event
     def tick(self, dt):
+        self.update = ""
         read_list, _, _ = select.select(self.sockList, [], [])
         for sock in read_list:
             # socket server (new client connection)
@@ -105,20 +134,28 @@ class NetworkServerController:
                 sclient, addr = self.sock.accept()
                 self.sockList.append(sclient)
                 print('Connection by', addr)
+                nickname = sclient.recv(1500)
+                nickname = nickname.decode()
+                nickname = nickname.split(" ")
+                self.nicknames[sclient] = nickname[2]
+                self.model.add_character(nickname[2], isplayer=True)
+                sclient.send(b"ACK")
+                self.sendModel(sclient)
 
             # socket client (new client message)
             else:
                 # TODO: treat data
-                data = sock.recv(1500)
-                sock.send(b"ACK")
-                self.treat(data, sock)
-                if data == b'' or data == b'\n' :
-                    print('{} was disconnected.'.format(self.nicknames[sock]))
-                    self.model.kill_character(self.nicknames[sock])
-                    self.sockList.remove(sock)
-                    # TODO: envoyer un update de mouvement
-                    self.nicknames.pop(sock)
-                    sock.close()
+                try :
+                    data = sock.recv(1500)
+                    sock.send(b"ACK")
+                    self.treat(data, sock)
+                    if data == b'' or data == b'\n' :
+                        self.disconnectClient(sock)
+                except :
+                    self.disconnectClient(sock)
+        self.update += "END"
+        print(self.update)
+        self.broadcast(self.update)
         return True
 
 ################################################################################
@@ -132,6 +169,7 @@ class NetworkClientController:
         self.host = host
         self.port = port
         self.nickname = nickname
+        self.update = "UPDATA"
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         # connexion to server
         try :
@@ -144,9 +182,10 @@ class NetworkClientController:
 
     # get initial Model
     def getModel(self):
-        self.sock.sendall(GET_MODEL_STR)
-        ack = self.sock.recv(1000)
+        #self.sock.sendall(GET_MODEL_STR)
+        #ack = self.sock.recv(1000)
         data = self.sock.recv(1500)
+        print(data)
         self.sock.send(b"ACK")
         self.treatData(data)
 
@@ -157,51 +196,68 @@ class NetworkClientController:
         ack = self.sock.recv(1000)
         print("Nickname send : {}".format(self.nickname))
 
+    def sendData(self, data):
+        self.sock.sendall(data)
+        ack = self.sock.recv(1000)
+
     # treat received data for updating the client model
     def treatData(self, data):
+        if data==b'':
+            print("Connection lost.")
+            sys.exit()
         print("Enter in data treatment")
-        data = data.decode()
-        data_a = data.split(" ")
+        data_str = data.decode()
+        data_a = data_str.split(" ")
         print(data_a)
         i = 0
-        # get the original model
-        if data_a[i]=="MODEL":
-            while data_a[i]!="END":
-                # add a fruit
-                if data_a[i]=="FRUIT":
-                    self.model.add_fruit(int(data_a[i+3]), (int(data_a[i+1]), int(data_a[i+2])))
-                    i+=3
-                # add a character
-                elif data_a[i]=="CHARACTER":
-                    kind_c = int(data_a[i+1])
-                    health_c = int(data_a[i+2])
-                    immunity_c = float(data_a[i+3])
-                    disarmed_c = float(data_a[i+4])
-                    nickname_c = data_a[i+5]
-                    position = (int(data_a[i+6]), int(data_a[i+7]))
-                    direction_c = data_a[i+8]
-                    self.model.add_character(nickname_c, isplayer=True, kind=kind_c, pos=position)
-                    for character in self.model.characters :
-                        if character.nickname == nickname_c :
-                            character.immunity = immunity_c
-                            character.disarmed = disarmed_c
-                            character.health = health_c
-                    i+=8
-                # add a bomb
-                elif data_a[i]=="BOMB":
-                    position = (int(data_a[i+1], int(data_a[i+2])))
-                    max_range_b = int(data_a[i+3])
-                    countdown_b = int(data_a[i+4])
-                    time_to_explode_b = float(data_a[i+5])
-                    self.model.bombs.append(Bomb(self.map, position))
-                    self.model.bombs[-1].countdown = countdown_b
-                    self.model.bombs[-1].time_to_explode = time_to_explode_b
-                    self.model.bombs[-1].max_range = max_range_b
-                    i+=5
+        while data_a[i]!="END" and data_a[i]!="ACK" and data_a[i]!="ACKEND":
+            # get the original model
+            if data_a[i]=="MODEL":
+                while data_a[i]!="END":
+                    # add a fruit
+                    if data_a[i]=="FRUIT":
+                        self.model.add_fruit(int(data_a[i+3]), (int(data_a[i+1]), int(data_a[i+2])))
+                        i+=3
+                    # add a character
+                    elif data_a[i]=="CHARACTER":
+                        kind_c = int(data_a[i+1])
+                        health_c = int(data_a[i+2])
+                        immunity_c = float(data_a[i+3])
+                        disarmed_c = float(data_a[i+4])
+                        nickname_c = data_a[i+5]
+                        position = (int(data_a[i+6]), int(data_a[i+7]))
+                        direction_c = data_a[i+8]
+                        self.model.add_character(nickname_c, isplayer=True, kind=kind_c, pos=position)
+                        for character in self.model.characters :
+                            if character.nickname == nickname_c :
+                                character.immunity = immunity_c
+                                character.disarmed = disarmed_c
+                                character.health = health_c
+                        i+=7
+                    # add a bomb
+                    elif data_a[i]=="BOMB":
+                        position = (int(data_a[i+1], int(data_a[i+2])))
+                        max_range_b = int(data_a[i+3])
+                        countdown_b = int(data_a[i+4])
+                        time_to_explode_b = float(data_a[i+5])
+                        self.model.bombs.append(Bomb(self.map, position))
+                        self.model.bombs[-1].countdown = countdown_b
+                        self.model.bombs[-1].time_to_explode = time_to_explode_b
+                        self.model.bombs[-1].max_range = max_range_b
+                        i+=4
+                    i+=1
+            #elif data==GET_NICKNAME_STR:
+                #self.sock.sendall(self.nickname.encode())
+                #ack = self.sock.recv(1000)
+            elif data_a[i]=="MOVE":
+                if data[i+1]!=self.nickname:
+                    self.model.move_character(data_a[i+1], int(data_a[i+2]))
+                i += 1
+            elif data_a[i]=="KILL":
+                self.model.kill_character(data_a[i+1])
+                i += 1
+            else :
                 i+=1
-        elif data.encode()==GET_NICKNAME_STR:
-            self.sock.sendall(self.nickname.encode())
-            ack = self.sock.recv(1000)
 
     # keyboard events
     def keyboard_quit(self):
@@ -210,7 +266,10 @@ class NetworkClientController:
 
     def keyboard_move_character(self, direction):
         print("=> event \"keyboard move direction\" {}".format(DIRECTIONS_STR[direction]))
-        # ...
+        self.update += "MOVE {}".format(direction)
+        nickname = self.nickname
+        if direction in DIRECTIONS:
+            self.model.move_character(nickname, direction)
         return True
 
     def keyboard_drop_bomb(self):
@@ -220,11 +279,11 @@ class NetworkClientController:
 
     # time event
     def tick(self, dt):
-        #data = self.sock.recv(1500)
-        #self.sock.send(b"ACK")
-        #if data==b'':
-            #print("Connection closed.")
-            #self.sock.close()
-            #return False
+        data = self.update.encode()
+        print(data)
+        self.sendData(data)
         #self.treatData(data)
+        self.update = "UPDATA"
+        new_data = self.sock.recv(1500)
+        self.treatData(new_data)
         return True
